@@ -1,6 +1,6 @@
 require 'faye/websocket'
+require 'kafka'
 require 'thread'
-require 'redis'
 require 'json'
 require 'erb'
 
@@ -12,21 +12,29 @@ module ChatDemo
     def initialize(app)
       @app     = app
       @clients = []
-      uri = URI.parse(ENV["REDISCLOUD_URL"])
-      @redis = Redis.new(host: uri.host, port: uri.port, password: uri.password)
+
+      @kafka = Kafka.new(
+        seed_brokers: ENV.fetch("KAFKA_URL"),
+        ssl_ca_cert: ENV.fetch("KAFKA_TRUSTED_CERT"),
+        ssl_client_cert: ENV.fetch("KAFKA_CLIENT_CERT"),
+        ssl_client_cert_key: ENV.fetch("KAFKA_CLIENT_CERT_KEY"),
+      )
+
+      @producer = @kafka.producer
+
       Thread.new do
-        redis_sub = Redis.new(host: uri.host, port: uri.port, password: uri.password)
-        redis_sub.subscribe(CHANNEL) do |on|
-          on.message do |channel, msg|
-            @clients.each {|ws| ws.send(msg) }
-          end
+        consumer = @kafka.consumer(group_id: "chat")
+        consumer.subscribe(CHANNEL)
+
+        consumer.each_message do |message|
+          @clients.each {|ws| ws.send(message.value) }
         end
       end
     end
 
     def call(env)
       if Faye::WebSocket.websocket?(env)
-        ws = Faye::WebSocket.new(env, nil, {ping: KEEPALIVE_TIME })
+        ws = Faye::WebSocket.new(env, nil, ping: KEEPALIVE_TIME)
         ws.on :open do |event|
           p [:open, ws.object_id]
           @clients << ws
@@ -34,7 +42,8 @@ module ChatDemo
 
         ws.on :message do |event|
           p [:message, event.data]
-          @redis.publish(CHANNEL, sanitize(event.data))
+          @producer.produce(sanitize(event.data), topic: CHANNEL, partition: 0)
+          @producer.deliver_messages
         end
 
         ws.on :close do |event|
@@ -45,7 +54,6 @@ module ChatDemo
 
         # Return async Rack response
         ws.rack_response
-
       else
         @app.call(env)
       end
