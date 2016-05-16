@@ -23,10 +23,18 @@ module ChatDemo
       @producer = @kafka.producer
 
       Thread.new do
-        consumer = @kafka.consumer(group_id: "chat")
+        kafka = Kafka.new(
+          seed_brokers: ENV.fetch("KAFKA_URL"),
+          ssl_ca_cert: ENV.fetch("KAFKA_TRUSTED_CERT"),
+          ssl_client_cert: ENV.fetch("KAFKA_CLIENT_CERT"),
+          ssl_client_cert_key: ENV.fetch("KAFKA_CLIENT_CERT_KEY"),
+        )
+
+        consumer = kafka.consumer(group_id: "chat")
         consumer.subscribe(CHANNEL)
 
         consumer.each_message do |message|
+          puts "Broadcasting #{message.value.inspect}"
           @clients.each {|ws| ws.send(message.value) }
         end
       end
